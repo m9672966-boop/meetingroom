@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 TOKEN = '7241979147:AAF6tcOzQqpwsXdyJz5HjskshXp4zfXFYIA'
-ADMIN_ID = 896891089
+ADMIN_ID = 336723881
 TIMEZONE = pytz.timezone('Europe/Moscow')
 REMINDER_MINUTES = 15
 async def start_calendar_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
