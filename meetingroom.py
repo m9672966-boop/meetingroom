@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -27,6 +28,19 @@ TOKEN = '7241979147:AAF6tcOzQqpwsXdyJz5HjskshXp4zfXFYIA'
 ADMIN_ID = 336723881
 TIMEZONE = pytz.timezone('Europe/Moscow')
 REMINDER_MINUTES = 15
+PORT = int(os.environ.get('PORT', 8443))
+
+# Добавьте недостающую функцию show_calendar
+async def show_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, room_id: int, year: int, month: int):
+    query = update.callback_query
+    await query.edit_message_text(
+        f"Календарь бронирований: {get_room_name(room_id)}\n"
+        "🔴 — есть бронирования, 🟢 — свободный день\n"
+        "Выберите день:",
+        reply_markup=generate_calendar(year, month, room_id),
+        parse_mode='HTML'
+    )
+
 async def start_calendar_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -110,6 +124,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+
 # Вспомогательные функции
 def is_admin(user_id: int) -> bool:
     conn = sqlite3.connect('meeting_rooms.db')
@@ -118,6 +133,7 @@ def is_admin(user_id: int) -> bool:
     result = cursor.fetchone()
     conn.close()
     return result and result[0] == 1
+
 def month_keyboard():
     months = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
     keyboard = []
@@ -129,6 +145,7 @@ def month_keyboard():
         ]
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
+
 def is_user_active(user_id: int) -> bool:
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
@@ -136,6 +153,7 @@ def is_user_active(user_id: int) -> bool:
     result = cursor.fetchone()
     conn.close()
     return result and result[0] == 1
+
 def get_room_name(room_id: int) -> str:
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
@@ -143,6 +161,7 @@ def get_room_name(room_id: int) -> str:
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else "Неизвестная комната"
+
 def get_user_bookings(user_id: int):
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
@@ -156,14 +175,28 @@ def get_user_bookings(user_id: int):
     bookings = cursor.fetchall()
     conn.close()
     return bookings
+
 def parse_db_time(time_str: str) -> datetime:
     """Парсит время из базы данных в datetime с учетом временной зоны"""
     try:
+        if isinstance(time_str, datetime):
+            return time_str.replace(tzinfo=TIMEZONE)
+            
         time_clean = time_str.split('+')[0].strip()
-        return datetime.strptime(time_clean, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TIMEZONE)
+        # Пробуем разные форматы
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f']:
+            try:
+                dt = datetime.strptime(time_clean, fmt)
+                return TIMEZONE.localize(dt)
+            except ValueError:
+                continue
+        # Если ничего не сработало, возвращаем текущее время
+        logger.error(f"Не удалось распарсить время: {time_str}")
+        return datetime.now(TIMEZONE)
     except Exception as e:
         logger.error(f"Ошибка парсинга времени '{time_str}': {e}")
-        raise ValueError("Неверный формат времени")
+        return datetime.now(TIMEZONE)
+
 # Клавиатуры
 def admin_keyboard():
     keyboard = [
@@ -175,6 +208,7 @@ def admin_keyboard():
         [InlineKeyboardButton("Мой профиль", callback_data='my_profile')]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 def user_keyboard():
     keyboard = [
         [InlineKeyboardButton("Забронировать комнату", callback_data='book_room')],
@@ -183,12 +217,14 @@ def user_keyboard():
         [InlineKeyboardButton("Мои бронирования", callback_data='my_bookings')]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 def profile_keyboard(is_admin: bool = False):
     keyboard = [
         [InlineKeyboardButton("Изменить имя", callback_data='change_name')],
         [InlineKeyboardButton("Назад", callback_data='back_to_main')]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 def day_keyboard(year, month):
     num_days = calendar.monthrange(year, month)[1]
     keyboard = []
@@ -201,6 +237,7 @@ def day_keyboard(year, month):
     if row:
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
+
 def generate_calendar(year: int, month: int, room_id: int) -> InlineKeyboardMarkup:
     cal = calendar.monthcalendar(year, month)
     month_name = calendar.month_name[month][:3].title()
@@ -210,9 +247,10 @@ def generate_calendar(year: int, month: int, room_id: int) -> InlineKeyboardMark
     week_days = ["Пн", "Вт", "Ср", "Чт", "Пт"]
     header_buttons = [InlineKeyboardButton(day, callback_data='ignore') for day in week_days]
     keyboard.append(header_buttons)
+    
     for week in cal:
         week_buttons = []
-        for i in range(5):
+        for i in range(5):  # Только рабочие дни
             if i < len(week) and week[i] != 0:
                 day = week[i]
                 date_str = f"{year}-{month:02d}-{day:02d}"
@@ -229,15 +267,12 @@ def generate_calendar(year: int, month: int, room_id: int) -> InlineKeyboardMark
 
                 emoji = "🔴" if has_bookings else "🟢"
                 text = f"{emoji} {day:2d}"
+                callback_data = f'day_{year}_{month}_{day}_{room_id}'
             else:
                 text = "  "
+                callback_data = 'ignore'
 
-            week_buttons.append(
-                InlineKeyboardButton(
-                    text,
-                    callback_data=f'day_{year}_{month}_{day}_{room_id}' if text.strip() else 'ignore'
-                )
-            )
+            week_buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
         keyboard.append(week_buttons)
 
     prev_month = month - 1 if month > 1 else 12
@@ -254,6 +289,7 @@ def generate_calendar(year: int, month: int, room_id: int) -> InlineKeyboardMark
     keyboard.append([InlineKeyboardButton("Назад", callback_data='back_to_main')])
 
     return InlineKeyboardMarkup(keyboard)
+
 def is_user_booking(booking_id: int, user_id: int) -> bool:
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
@@ -261,6 +297,7 @@ def is_user_booking(booking_id: int, user_id: int) -> bool:
     result = cursor.fetchone()
     conn.close()
     return result is not None
+
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -292,6 +329,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Ваш аккаунт ожидает одобрения администратором. Доступ временно ограничен."
         )
+
 async def start_booking_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -319,16 +357,13 @@ async def start_booking_process(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text(message_text, reply_markup=reply_markup)
 
-
 async def handle_occupied_time(update: Update, context: ContextTypes.DEFAULT_TYPE, room_id: int, booking_date: date):
     """
     Если выбранное время занято — показывает все бронирования на этот день.
-    Ничего не предлагает.
     """
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
 
-    # Получаем все брони на этот день
     cursor.execute('''
         SELECT b.start_time, b.end_time, u.full_name
         FROM bookings b
@@ -350,7 +385,6 @@ async def handle_occupied_time(update: Update, context: ContextTypes.DEFAULT_TYP
             end_dt = parse_db_time(end)
             message += f"\n⏱ {start_dt.strftime('%H:%M')}–{end_dt.strftime('%H:%M')} — {user_name}"
 
-    # Кнопка "Назад"
     keyboard = [
         [InlineKeyboardButton("Выбрать другое время", callback_data=f'select_room_{room_id}')],
         [InlineKeyboardButton("Отмена", callback_data='back_to_main')]
@@ -361,6 +395,7 @@ async def handle_occupied_time(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
+
 async def view_day_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE, room_id: int, year: int, month: int, day: int):
     date_str = f"{year}-{month:02d}-{day:02d}"
     booking_date = date(year, month, day)
@@ -392,10 +427,8 @@ async def view_day_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             end_dt = parse_db_time(end)
             message += f"⏱ {start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')} — {name}\n"
 
-    # Кнопки
     keyboard = []
 
-    # Если дата не в прошлом — можно забронировать
     if booking_date >= today:
         keyboard.append([
             InlineKeyboardButton("✅ Забронировать этот день", callback_data=f'book_selected_day_{year}_{month}_{day}_{room_id}')
@@ -409,17 +442,14 @@ async def view_day_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Обработка команды /start
     if update.message.text == '/start':
         await start(update, context)
         return
 
-    # Проверка активности пользователя
     if not is_user_active(user_id) and user_id != ADMIN_ID:
         await update.message.reply_text("Ваш доступ не активирован.")
         return
 
-    # Проверка, что пользователь находится в процессе ввода
     if 'waiting_for' not in context.user_data:
         await update.message.reply_text(
             "Чтобы начать, используйте команду /start или кнопки меню.",
@@ -430,7 +460,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     waiting_for = context.user_data['waiting_for']
 
     try:
-        # Ожидание ввода времени начала
         if waiting_for == 'start_time':
             hours, minutes = map(int, update.message.text.split(':'))
             now = datetime.now(TIMEZONE)
@@ -439,15 +468,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 datetime(booking_date.year, booking_date.month, booking_date.day, hours, minutes)
             )
 
-            # Проверка: не в прошлом ли время?
             if start_datetime < now:
                 await update.message.reply_text("Нельзя забронировать время в прошлом. Введите другое время:")
                 return
 
             room_id = context.user_data['selected_room']
 
-            # Проверка на пересечение с существующими бронями
-            conn = sqlite3.connect('meeting_rooms.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+            conn = sqlite3.connect('meeting_rooms.db')
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT 1 FROM bookings
@@ -461,12 +488,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             conn.close()
 
-            # Сохраняем время начала
             context.user_data['start_time'] = f"{hours:02d}:{minutes:02d}"
             await update.message.reply_text("Введите продолжительность бронирования в минутах (например, 30):")
             context.user_data['waiting_for'] = 'duration'
 
-        # Ожидание ввода продолжительности
         elif waiting_for == 'duration':
             duration = int(update.message.text)
             if duration <= 0:
@@ -480,8 +505,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start_datetime = TIMEZONE.localize(datetime(booking_date.year, booking_date.month, booking_date.day, hours, minutes))
             end_datetime = start_datetime + timedelta(minutes=duration)
 
-            # Повторная проверка на пересечение (на случай, что кто-то забронировал за это время)
-            conn = sqlite3.connect('meeting_rooms.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+            conn = sqlite3.connect('meeting_rooms.db')
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT 1 FROM bookings
@@ -493,15 +517,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await handle_occupied_time(update, context, room_id, booking_date)
                 return
 
-            # Создание брони
             cursor.execute('''
                 INSERT INTO bookings (room_id, user_id, start_time, end_time)
                 VALUES (?, ?, ?, ?)
             ''', (room_id, user_id, start_datetime, end_datetime))
             conn.commit()
+            booking_id = cursor.lastrowid
             conn.close()
 
-            # Сброс состояния
             context.user_data.clear()
 
             room_name = get_room_name(room_id)
@@ -512,7 +535,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML'
             )
 
-        # Другие состояния (например, добавление комнаты, смена имени и т.д.)
+            # Установка напоминания
+            reminder_time = start_datetime - timedelta(minutes=REMINDER_MINUTES)
+            if reminder_time > datetime.now(TIMEZONE):
+                context.application.job_queue.run_once(
+                    send_reminder,
+                    when=reminder_time,
+                    data={'chat_id': user_id, 'booking_id': booking_id},
+                    name=f"reminder_{booking_id}"
+                )
+
         elif waiting_for == 'room_name':
             room_name = update.message.text.strip()
             if not room_name:
@@ -548,7 +580,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Неизвестное состояние. Пожалуйста, начните с команды /start.")
 
     except ValueError:
-        # Обработка ошибок ввода (неверный формат времени или не число)
         if waiting_for == 'start_time':
             await update.message.reply_text("Неверный формат времени. Введите в формате ЧЧ:ММ (например, 14:30).")
         elif waiting_for == 'duration':
@@ -590,6 +621,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Ошибка напоминания: {e}")
+
 async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
@@ -786,306 +818,178 @@ async def cancel_booking(update: Update, context: ContextTypes.DEFAULT_TYPE, boo
         await update.callback_query.answer("Бронирование не найдено!", show_alert=True)
         return
 
-    room_name, start_time, end_time = booking_info
-
     conn = sqlite3.connect('meeting_rooms.db')
     cursor = conn.cursor()
     cursor.execute('DELETE FROM bookings WHERE booking_id = ?', (booking_id,))
     conn.commit()
     conn.close()
 
-    current_jobs = context.job_queue.get_jobs_by_name(f"reminder_{booking_id}")
-    for job in current_jobs:
-        job.schedule_removal()
+    room_name, start_time, end_time = booking_info
+    start_dt = parse_db_time(start_time)
+    end_dt = parse_db_time(end_time)
 
-    try:
-        start_dt = parse_db_time(start_time)
-        end_dt = parse_db_time(end_time)
-        message = (
-            f"✅ Ваше бронирование отменено!\n\n"
-            f"🔹 {room_name}\n"
-            f"📅 {start_dt.strftime('%d.%m.%Y')}\n"
-            f"🕒 {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при парсинге времени при отмене брони {booking_id}: {e}")
-        message = f"✅ Бронирование в комнате '{room_name}' отменено (время недоступно)."
+    await update.callback_query.edit_message_text(
+        f"✅ Бронирование отменено:\n\n"
+        f"🔹 {room_name}\n"
+        f"📅 {start_dt.strftime('%d.%m.%Y')}\n"
+        f"🕒 {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+    )
 
-    await update.callback_query.edit_message_text(message)
-    await asyncio.sleep(2)
-    await show_user_bookings(update, context)
-async def ask_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(TIMEZONE)
-    years = [now.year, now.year + 1]
-    keyboard = [[InlineKeyboardButton(str(y), callback_data=f'selected_year_{y}') for y in years]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    # Используем query.message, если есть
-    if update.message:
-        await update.message.reply_text("Выберите год:", reply_markup=reply_markup)
-    elif update.callback_query:
-        await update.callback_query.message.reply_text("Выберите год:", reply_markup=reply_markup)
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = query.from_user.id
 
     if not is_user_active(user_id) and user_id != ADMIN_ID:
-        await query.edit_message_text("Ваш доступ не активирован.")
+        await query.edit_message_text("Ваш аккаунт ожидает одобрения администратором.")
         return
 
-    if data.startswith('select_calendar_room_'):
-        room_id = int(data.split('_')[3])
-        now = datetime.now(TIMEZONE)
-        await query.edit_message_text(
-            f"Календарь бронирований: {get_room_name(room_id)}\n"
-            "🔴 — есть бронирования, 🟢 — свободный день\n"
-            "Выберите день:",
-            reply_markup=generate_calendar(now.year, now.month, room_id),
-            parse_mode='HTML'
-        )
-    elif data.startswith('nav_'):
-        _, year, month, room_id = data.split('_')
-        await show_calendar(update, context, int(room_id), int(year), int(month))
-    elif data.startswith('today_'):
-        room_id = int(data.split('_')[1])
-        now = datetime.now(TIMEZONE)
-        context.user_data['selected_room'] = room_id
-        context.user_data['booking_date'] = now.date()
-        await query.edit_message_text(
-            f"Вы выбрали сегодня ({now.strftime('%d.%m.%Y')}).\n"
-            "Введите время начала в формате ЧЧ:ММ:"
-        )
-        context.user_data['waiting_for'] = 'start_time'
-    elif data.startswith('auto_start_'):
-        try:
-            _, datetime_str, room_id = data.split('_', 2)
-            room_id = int(room_id)
-            start_datetime = datetime.strptime(datetime_str, '%Y-%m-%d_%H:%M').replace(tzinfo=TIMEZONE)
-
-            context.user_data['selected_room'] = room_id
-            context.user_data['booking_date'] = start_datetime.date()
-            context.user_data['start_time'] = start_datetime.strftime('%H:%M')
-
-            await query.edit_message_text(
-                f"Время установлено: {start_datetime.strftime('%H:%M')}\n"
-                "Введите продолжительность бронирования в минутах (например, 30):"
-            )
-            context.user_data['waiting_for'] = 'duration'
-
-        except Exception as e:
-            logger.error(f"Ошибка при auto_start: {e}")
-            await query.answer("Ошибка при установке времени.", show_alert=True)
-    elif data.startswith('book_selected_day_'):
-        parts = data.split('_')
-        if len(parts) != 7:
-            await query.answer("Ошибка: неверные данные.", show_alert=True)
-            return
-        year, month, day, room_id = map(int, parts[3:])
-        context.user_data['selected_room'] = room_id
-        context.user_data['booking_date'] = date(year, month, day)
-        await query.edit_message_text(
-            f"Вы выбрали {day:02d}.{month:02d}.{year}.\nВведите время начала в формате ЧЧ:ММ:"
-        )
-        context.user_data['waiting_for'] = 'start_time'
-    elif data.startswith('day_') and len(data.split('_')) == 5:
-        # Это день из календаря: day_2025_8_12_1
-        try:
-            parts = data.split('_')
-            year, month, day, room_id = map(int, parts[1:])
-            await view_day_bookings(update, context, room_id, year, month, day)
-        except (ValueError, IndexError):
-            await query.answer("Некорректные данные дня", show_alert=True)
-
-    elif data.startswith('day_') and len(data.split('_')) == 2:
-        # Это выбор дня при бронировании: day_12
-        if 'selected_year' not in context.user_data or 'selected_month' not in context.user_data:
-            await query.answer("Сначала выберите год и месяц", show_alert=True)
-            return
-        try:
-            day = int(data.split('_')[1])
-            year = context.user_data['selected_year']
-            month = context.user_data['selected_month']
-            booking_date = date(year, month, day)
-            today = datetime.now(TIMEZONE).date()
-            if booking_date < today:
-                await query.answer("Нельзя забронировать прошедший день!", show_alert=True)
-                return
-            context.user_data['booking_date'] = booking_date
-            await query.edit_message_text("Введите время начала в формате ЧЧ:ММ:")
-            context.user_data['waiting_for'] = 'start_time'
-        except ValueError:
-            await query.answer("Некорректный день", show_alert=True)
-    elif data.startswith('selected_year_'):
-        year = int(data.split('_')[2])
-        context.user_data['selected_year'] = year
-        await query.message.reply_text("Выберите месяц:", reply_markup=month_keyboard())
-    elif data.startswith('user_action_'):
-        if not is_admin(user_id):
-            await query.answer("Только администратор может управлять пользователями!", show_alert=True)
-            return
-        target_id = int(data.split('_')[2])
-        conn = sqlite3.connect('meeting_rooms.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT full_name, is_active FROM users WHERE user_id = ?', (target_id,))
-        user = cursor.fetchone()
-        if not user:
-            await query.answer("Пользователь не найден.")
-            conn.close()
-            return
-        full_name, is_active = user
-        conn.close()
-
-        keyboard = [
-            [InlineKeyboardButton("✅ Активировать", callback_data=f'activate_user_{target_id}')],
-            [InlineKeyboardButton("❌ Деактивировать", callback_data=f'deactivate_user_{target_id}')],
-            [InlineKeyboardButton("Назад к списку", callback_data='manage_users')]
-        ]
-        await query.edit_message_text(
-            f"Управление пользователем: {full_name}\n"
-            f"Статус: {'✅ Активен' if is_active else '⏳ Ожидает'}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-    elif data.startswith('activate_user_'):
-
-        if not is_admin(user_id):
-            await query.answer("Только администратор может активировать!", show_alert=True)
-
-            return
-
-        target_id = int(data.split('_')[2])
-
-        conn = sqlite3.connect('meeting_rooms.db')
-
-        cursor = conn.cursor()
-
-        cursor.execute('UPDATE users SET is_active = 1 WHERE user_id = ?', (target_id,))
-
-        conn.commit()
-
-        conn.close()
-
-        await query.answer("✅ Пользователь активирован!")
-
-        try:
-
-            await context.bot.send_message(chat_id=target_id, text="✅ Ваш доступ к боту активирован!")
-
-        except Exception as e:
-
-            logger.error(f"Не удалось уведомить пользователя {target_id}: {e}")
-
-        await manage_users(update, context)  # ✅ Добавлено: обновляем список
-
-    elif data.startswith('deactivate_user_'):
-        if not is_admin(user_id):
-            await query.answer("Только администратор может деактивировать!", show_alert=True)
-            return
-        target_id = int(data.split('_')[2])
-        conn = sqlite3.connect('meeting_rooms.db')
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET is_active = 0 WHERE user_id = ?', (target_id,))
-        conn.commit()
-        conn.close()
-        await query.answer("❌ Пользователь деактивирован.")
-        try:
-            await context.bot.send_message(chat_id=target_id, text="❌ Ваш доступ к боту был отключен администратором.")
-        except Exception as e:
-            logger.error(f"Не удалось уведомить пользователя {target_id}: {e}")
-        await manage_users(update, context)  # ✅ Обновляем список
-    elif data == 'view_calendar':
-        await start_calendar_process(update, context)
-    elif data.startswith('back_to_calendar_'):
-        room_id = int(data.split('_')[3])
-        await show_calendar(update, context, room_id)
-    elif data == 'book_room':
-        await start_booking_process(update, context)
-    elif data.startswith('select_room_'):
-        room_id = int(data.split('_')[2])
-        context.user_data['selected_room'] = room_id
-        await ask_year(update, context)
-    elif data.startswith('selected_year_'):
-        year = int(data.split('_')[2])
-        context.user_data['selected_year'] = year
-        await query.message.reply_text("Выберите месяц:", reply_markup=month_keyboard())
-    elif data.startswith('quick_book_'):
-        try:
-            _, datetime_str, duration, room_id = data.split('_')
-            room_id = int(room_id)
-            duration = int(duration)
-
-            # Парсим дату и время
-            start_datetime = datetime.strptime(datetime_str, '%Y-%m-%d_%H:%M').replace(tzinfo=TIMEZONE)
-            end_datetime = start_datetime + timedelta(minutes=duration)
-
-            # Создаем бронирование
-            conn = sqlite3.connect('meeting_rooms.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                    INSERT INTO bookings (room_id, user_id, start_time, end_time)
-                    VALUES (?, ?, ?, ?)
-                ''', (room_id, user_id, start_datetime, end_datetime))
-            conn.commit()
-            booking_id = cursor.lastrowid
-            conn.close()
-
-            # Очищаем данные пользователя
-            context.user_data.clear()
-
-            # Отправляем подтверждение
-            await query.edit_message_text(
-                f"✅ Вы забронировали комнату '{get_room_name(room_id)}'\n"
-                f"🕒 {start_datetime.strftime('%d.%m %H:%M')} - {end_datetime.strftime('%H:%M')}"
-            )
-
-            # Устанавливаем напоминание
-            reminder_time = start_datetime - timedelta(minutes=REMINDER_MINUTES)
-            if reminder_time > datetime.now(TIMEZONE):
-                context.job_queue.run_once(
-                    send_reminder,
-                    when=reminder_time,
-                    data={'chat_id': user_id, 'booking_id': booking_id},
-                    name=f"reminder_{booking_id}"
-                )
-
-        except Exception as e:
-            logger.error(f"Ошибка быстрого бронирования: {e}")
-            await query.answer("Произошла ошибка при бронировании", show_alert=True)
-    elif data == 'manage_users' and is_admin(user_id):
-        await manage_users(update, context)
-    elif data == 'view_bookings' and is_admin(user_id):
-        await view_bookings(update, context)
-    elif data == 'add_room' and is_admin(user_id):
-        await query.edit_message_text("Введите название новой переговорной комнаты:")
-        context.user_data['waiting_for'] = 'room_name'
-    elif data == 'my_profile':
-        await show_profile(update, context)
-    elif data == 'my_bookings':
-        await show_user_bookings(update, context)
-    elif data.startswith('cancel_booking_'):
-        booking_id = int(data.split('_')[2])
-        await confirm_cancel_booking(update, context, booking_id)
-    elif data.startswith('confirm_cancel_'):
-        booking_id = int(data.split('_')[2])
-        await cancel_booking(update, context, booking_id)
-    elif data == 'change_name':
-        await query.edit_message_text("Введите новое имя:")
-        context.user_data['waiting_for'] = 'new_name'
-    elif data.startswith('month_'):
-        month = int(data.split('_')[1])
-        context.user_data['selected_month'] = month
-        year = context.user_data['selected_year']
-        await query.message.reply_text("Выберите день:", reply_markup=day_keyboard(year, month))
-    elif data == 'back_to_main':
+    if data == 'back_to_main':
         if is_admin(user_id):
             await query.edit_message_text("Администраторское меню:", reply_markup=admin_keyboard())
         else:
             await query.edit_message_text("Главное меню:", reply_markup=user_keyboard())
-    else:
-        await query.edit_message_text("Неизвестная команда")
 
+    elif data == 'back_to_admin':
+        await query.edit_message_text("Администраторское меню:", reply_markup=admin_keyboard())
+
+    elif data == 'book_room':
+        await start_booking_process(update, context)
+
+    elif data == 'view_calendar':
+        await start_calendar_process(update, context)
+
+    elif data == 'my_profile':
+        await show_profile(update, context)
+
+    elif data == 'my_bookings':
+        await show_user_bookings(update, context)
+
+    elif data == 'add_room':
+        if not is_admin(user_id):
+            await query.answer("У вас нет прав администратора!", show_alert=True)
+            return
+        context.user_data['waiting_for'] = 'room_name'
+        await query.edit_message_text("Введите название новой переговорной комнаты:")
+
+    elif data == 'manage_users':
+        await manage_users(update, context)
+
+    elif data == 'view_bookings':
+        await view_bookings(update, context)
+
+    elif data == 'change_name':
+        context.user_data['waiting_for'] = 'new_name'
+        await query.edit_message_text("Введите ваше новое имя:")
+
+    elif data.startswith('select_room_'):
+        room_id = int(data.split('_')[2])
+        context.user_data['selected_room'] = room_id
+        context.user_data['waiting_for'] = 'start_time'
+        await query.edit_message_text(
+            f"Вы выбрали: {get_room_name(room_id)}\n"
+            f"Введите время начала бронирования в формате ЧЧ:ММ (например, 14:30):"
+        )
+
+    elif data.startswith('select_calendar_room_'):
+        room_id = int(data.split('_')[3])
+        now = datetime.now(TIMEZONE)
+        await show_calendar(update, context, room_id, now.year, now.month)
+
+    elif data.startswith('nav_'):
+        parts = data.split('_')
+        year = int(parts[1])
+        month = int(parts[2])
+        room_id = int(parts[3])
+        await show_calendar(update, context, room_id, year, month)
+
+    elif data.startswith('today_'):
+        room_id = int(data.split('_')[1])
+        now = datetime.now(TIMEZONE)
+        await show_calendar(update, context, room_id, now.year, now.month)
+
+    elif data.startswith('day_'):
+        parts = data.split('_')
+        if len(parts) == 5:
+            year = int(parts[1])
+            month = int(parts[2])
+            day = int(parts[3])
+            room_id = int(parts[4])
+            await view_day_bookings(update, context, room_id, year, month, day)
+
+    elif data.startswith('book_selected_day_'):
+        parts = data.split('_')
+        year = int(parts[4])
+        month = int(parts[5])
+        day = int(parts[6])
+        room_id = int(parts[7])
+        context.user_data['selected_room'] = room_id
+        context.user_data['booking_date'] = date(year, month, day)
+        context.user_data['waiting_for'] = 'start_time'
+        await query.edit_message_text(
+            f"Вы выбрали: {get_room_name(room_id)} на {day:02d}.{month:02d}.{year}\n"
+            f"Введите время начала бронирования в формате ЧЧ:ММ (например, 14:30):"
+        )
+
+    elif data.startswith('user_action_'):
+        target_user_id = int(data.split('_')[2])
+        conn = sqlite3.connect('meeting_rooms.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT full_name, is_active FROM users WHERE user_id = ?', (target_user_id,))
+        user_info = cursor.fetchone()
+        conn.close()
+
+        if not user_info:
+            await query.answer("Пользователь не найден!", show_alert=True)
+            return
+
+        full_name, is_active = user_info
+        keyboard = []
+        if not is_active:
+            keyboard.append([InlineKeyboardButton("✅ Активировать", callback_data=f'activate_{target_user_id}')])
+        else:
+            keyboard.append([InlineKeyboardButton("⏳ Деактивировать", callback_data=f'deactivate_{target_user_id}')])
+        keyboard.append([InlineKeyboardButton("Назад", callback_data='manage_users')])
+
+        await query.edit_message_text(
+            f"Пользователь: {full_name}\nСтатус: {'✅ Активен' if is_active else '⏳ Ожидает активации'}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith('activate_'):
+        target_user_id = int(data.split('_')[1])
+        conn = sqlite3.connect('meeting_rooms.db')
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_active = 1 WHERE user_id = ?', (target_user_id,))
+        conn.commit()
+        conn.close()
+        await query.answer("Пользователь активирован!", show_alert=True)
+        await manage_users(update, context)
+
+    elif data.startswith('deactivate_'):
+        target_user_id = int(data.split('_')[1])
+        conn = sqlite3.connect('meeting_rooms.db')
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_active = 0 WHERE user_id = ?', (target_user_id,))
+        conn.commit()
+        conn.close()
+        await query.answer("Пользователь деактивирован!", show_alert=True)
+        await manage_users(update, context)
+
+    elif data.startswith('cancel_booking_'):
+        booking_id = int(data.split('_')[2])
+        await confirm_cancel_booking(update, context, booking_id)
+
+    elif data.startswith('confirm_cancel_'):
+        booking_id = int(data.split('_')[2])
+        await cancel_booking(update, context, booking_id)
+
+    elif data == 'ignore':
+        pass
+
+    else:
+        await query.edit_message_text("Неизвестная команда. Пожалуйста, используйте /start для начала.")
 
 def main():
     init_db()
@@ -1093,16 +997,21 @@ def main():
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("book", start_booking_process))
-    application.add_handler(CommandHandler("calendar", start_calendar_process))
-    application.add_handler(CommandHandler("mybookings", show_user_bookings))
-    application.add_handler(CommandHandler("profile", show_profile))
-
-    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    application.run_polling()
-
+    # Запуск приложения для Render
+    if os.environ.get('RENDER'):
+        # Для Render используем webhook
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"https://your-app-name.onrender.com/{TOKEN}"
+        )
+    else:
+        # Для локальной разработки используем polling
+        application.run_polling()
 
 if __name__ == '__main__':
     main()
