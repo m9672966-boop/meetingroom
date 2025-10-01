@@ -8,7 +8,9 @@ httpcore==1.0.9
 httpx==0.28.1
 idna==3.10
 python-telegram-bot==20.7
-pytz==2025.2
+pytz
+apscheduler
+flask
 requests==2.32.4
 rfc3986==1.5.0
 setuptools==80.9.0
@@ -19,4 +21,5 @@ typing_extensions==4.14.1
 tzdata==2025.2
 tzlocal==5.3.1
 urllib3==2.5.0
+
 
